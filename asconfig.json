@@ -1,22 +1,32 @@
 {
   "targets": {
     "debug": {
-      "binaryFile": "build/debug.wasm",
+      "outFile": "build/debug.wasm",
       "textFile": "build/debug.wat",
       "sourceMap": true,
       "debug": true
     },
     "release": {
-      "binaryFile": "build/release.wasm",
+      "outFile": "build/release.wasm",
       "textFile": "build/release.wat",
       "sourceMap": true,
       "optimizeLevel": 3,
-      "shrinkLevel": 1,
+      "shrinkLevel": 0,
       "converge": false,
       "noAssert": false
     }
   },
   "options": {
-    "bindings": "esm"
+    "bindings": "esm",
+    "exportRuntime": true,
+    "exportTable": true,
+    "importMemory": false,
+    "initialMemory": 256,
+    "maximumMemory": 256,
+    "noExportMemory": false,
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "pedantic": true,
+    "strictNullChecks": true
   }
 }

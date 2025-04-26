@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebAssembly Browser Test</title>
+</head>
+<body>
+    <h1>WebAssembly Browser Test</h1>
+    <div id="output"></div>
+    <script type="module">
+        import { getHelloWorld } from '../../build/debug.js';
+
+        async function runTest() {
+            try {
+                // Call the function and display the result
+                const output = document.getElementById('output');
+                output.textContent = await getHelloWorld();
+            } catch (error) {
+                console.error('Error running browser test:', error);
+                document.getElementById('output').textContent = 'Error: ' + error.message;
+            }
+        }
+
+        runTest();
+    </script>
+</body>
+</html> 

@@ -3,10 +3,19 @@ import path from 'path';
 
 import { Command } from 'commander';
 
-import { Installer, MCPServerConfig } from './installer';
+import { Pipeline } from './pipeline';
+import { MCPServerConfig } from './installer';
 
 interface RawConfig {
-  mcpServers: {
+  mcpServers?: {
+    [key: string]: {
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      [key: string]: unknown;
+    };
+  };
+  'mcp-servers'?: {
     [key: string]: {
       command?: string;
       args?: string[];
@@ -17,12 +26,17 @@ interface RawConfig {
 }
 
 async function validateConfig(config: RawConfig): Promise<{ serverConfig: MCPServerConfig; projectName: string }> {
-  const serverConfigs = Object.entries(config.mcpServers);
-  if (serverConfigs.length === 0) {
+  const serverConfigs = config.mcpServers || config['mcp-servers'];
+  if (!serverConfigs) {
+    throw new Error('No server configurations found in the config file. Expected either "mcpServers" or "mcp-servers" as root key.');
+  }
+
+  const entries = Object.entries(serverConfigs);
+  if (entries.length === 0) {
     throw new Error('No server configurations found in the config file');
   }
 
-  const [projectName, serverConfig] = serverConfigs[0];
+  const [projectName, serverConfig] = entries[0];
   if (!serverConfig.command || typeof serverConfig.command !== 'string') {
     throw new Error('Config must have a "command" string property');
   }
@@ -44,6 +58,8 @@ async function main() {
     .command('compile')
     .description('Compile and install packages based on config file')
     .requiredOption('--config-file <path>', 'Path to the config file')
+    .option('--debug-dir <path>', 'Path to store debug artifacts', './debug')
+    .option('--packages-dir <path>', 'Path to store installed packages', './packages')
     .action(async (options) => {
       try {
         const configPath = path.resolve(options.configFile);
@@ -53,13 +69,14 @@ async function main() {
         // Validate the config structure
         const { serverConfig, projectName } = await validateConfig(config);
 
-        // Initialize installer
-        const installer = new Installer({ path: './packages' });
-        await installer.initDir();
+        // Initialize and run the pipeline
+        const pipeline = new Pipeline({
+          debugDir: options.debugDir,
+          packagesDir: options.packagesDir
+        });
 
-        // Install the package
-        const installDir = await installer.install(serverConfig, projectName);
-        console.log(`Package installed successfully at: ${installDir}`);
+        await pipeline.run(serverConfig, projectName);
+        console.log('Pipeline completed successfully');
       } catch (error) {
         console.error('Error:', error instanceof Error ? error.message : 'Unknown error occurred');
         process.exit(1);
