@@ -13,7 +13,6 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/server-filesystem": "^2025.3.28",
     "assemblyscript": "^0.27.0",
     "commander": "^13.1.0"
   },
