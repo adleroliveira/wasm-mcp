@@ -1,5 +1,6 @@
 import { instantiate, ASUtil } from '@assemblyscript/loader';
 import { WorkerEvaluator } from './worker-evaluator.js';
+import { logger } from './logger.js';
 
 // Type definitions for WASM module exports.
 interface MyWasmExports extends ASUtil {
@@ -144,6 +145,7 @@ export class WasmRunner {
       this.instance.exports.run();
       await this.waitForWorkerCompletion();
     } catch (error) {
+      await this.destroy();
       throw new Error(`Failed to run WASM module: ${error}`);
     }
   }
@@ -168,6 +170,7 @@ export class WasmRunner {
       this.instance.exports.runJSCode(strPtr);
       await this.waitForWorkerCompletion();
     } catch (error) {
+      await this.destroy();
       throw new Error(`Failed to run JavaScript code: ${error}`);
     }
   }
@@ -215,18 +218,80 @@ export class WasmRunner {
    * Cleans up resources (e.g., terminates the worker).
    */
   async destroy(): Promise<void> {
-    if (this.workerEvaluator) {
-      try {
-        await this.workerEvaluator.terminate();
-      } catch (error) {
-        console.warn(`Failed to terminate WorkerEvaluator: ${error}`);
-      }
-      this.workerEvaluator = null;
+    if (!this.workerEvaluator) {
+      return;
     }
-    this.instance = null;
+
+    try {
+      // First terminate the worker
+      await this.workerEvaluator.terminate();
+      this.workerEvaluator = null;
+
+      // Then handle WASM cleanup
+      if (this.instance) {
+        const exports = this.instance.exports;
+
+        // Only proceed with memory cleanup if we have a valid memory instance
+        if (exports.memory) {
+          try {
+            // Run garbage collection if available
+            if (typeof exports.__collect === 'function') {
+              exports.__collect();
+            }
+
+            // Unpin all pinned objects if available
+            if (typeof exports.__unpin === 'function') {
+              // Note: In a real implementation, you might want to track pinned objects
+              // and unpin them individually. For now, we'll unpin the root.
+              exports.__unpin(0);
+            }
+
+            // Clear any remaining references
+            if (typeof exports.__free === 'function') {
+              // Note: In a real implementation, you might want to track allocated objects
+              // and free them individually. For now, we'll rely on __collect.
+              exports.__free(0);
+            }
+          } catch (error) {
+            // Log specific cleanup errors but don't throw - we want to ensure cleanup continues
+            logger.error(`WASM memory cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+
+        // Clear the instance reference
+        this.instance = null;
+      }
+    } catch (error) {
+      // Log any unexpected errors during cleanup
+      logger.error(`Unexpected error during WASM cleanup: ${error instanceof Error ? error.message : String(error)}`);
+      throw error; // Re-throw to ensure caller knows cleanup failed
+    } finally {
+      // Only close standard streams in Node.js environment
+      if (typeof process !== 'undefined' && process.stdout) {
+        try {
+          if (process.stdout) {
+            process.stdout.end();
+            process.stdout.destroy();
+          }
+          if (process.stderr) {
+            process.stderr.end();
+            process.stderr.destroy();
+          }
+        } catch (error) {
+          logger.error(`Error closing standard streams: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
   }
 
   async terminate(): Promise<void> {
+    await this.destroy();
+  }
+
+  /**
+   * Cleans up all resources. Should be called after all operations are complete.
+   */
+  async cleanup(): Promise<void> {
     await this.destroy();
   }
 }

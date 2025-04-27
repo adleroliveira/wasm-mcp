@@ -452,13 +452,17 @@ export class WorkerEvaluator {
         if (data.output) {
           logger.info('Worker output:', data.output);
         }
+        // Signal completion first
         pending.resolve();
+        // Then notify handlers
+        this.notifyMessageHandlers(data);
       } else {
         pending.reject(new Error(data.error?.message || 'Unknown error'));
       }
       this.pendingEvaluations.delete(data.id);
+    } else {
+      this.notifyMessageHandlers(data);
     }
-    this.notifyMessageHandlers(data);
   }
 
   /**
@@ -479,24 +483,35 @@ export class WorkerEvaluator {
    * Terminates the worker.
    */
   async terminate(): Promise<void> {
-    if (this.worker) {
-      try {
-        if (this.isBrowser) {
-          (this.worker as globalThis.Worker).terminate();
-          if (this.workerUrl) {
-            URL.revokeObjectURL(this.workerUrl);
-            this.workerUrl = null;
-          }
-        } else {
-          await (this.worker as import('worker_threads').Worker).terminate();
-        }
-      } catch (error) {
-        logger.warn(`Failed to terminate worker: ${error}`);
-      }
-      this.worker = null;
+    if (!this.worker) {
+      return;
     }
-    this.messageHandlers = [];
-    this.errorHandlers = [];
-    this.pendingEvaluations.clear();
+
+    logger.info('Starting worker termination...');
+    try {
+      // Clear all handlers and pending evaluations first
+      this.messageHandlers = [];
+      this.errorHandlers = [];
+      this.pendingEvaluations.clear();
+
+      if (this.isBrowser) {
+        logger.info('Terminating browser worker...');
+        (this.worker as globalThis.Worker).terminate();
+        if (this.workerUrl) {
+          logger.info('Revoking worker URL...');
+          URL.revokeObjectURL(this.workerUrl);
+          this.workerUrl = null;
+        }
+      } else {
+        logger.info('Terminating Node.js worker...');
+        const worker = this.worker as import('worker_threads').Worker;
+        await worker.terminate();
+      }
+    } catch (error) {
+      logger.warn(`Failed to terminate worker: ${error}`);
+    } finally {
+      this.worker = null;
+      logger.info('Worker termination complete');
+    }
   }
 }

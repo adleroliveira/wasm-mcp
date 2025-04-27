@@ -762,12 +762,14 @@ var _WorkerEvaluator = class _WorkerEvaluator {
           logger.info("Worker output:", data.output);
         }
         pending.resolve();
+        this.notifyMessageHandlers(data);
       } else {
         pending.reject(new Error(data.error?.message || "Unknown error"));
       }
       this.pendingEvaluations.delete(data.id);
+    } else {
+      this.notifyMessageHandlers(data);
     }
-    this.notifyMessageHandlers(data);
   }
   /**
    * Notifies message handlers.
@@ -785,25 +787,33 @@ var _WorkerEvaluator = class _WorkerEvaluator {
    * Terminates the worker.
    */
   async terminate() {
-    if (this.worker) {
-      try {
-        if (this.isBrowser) {
-          this.worker.terminate();
-          if (this.workerUrl) {
-            URL.revokeObjectURL(this.workerUrl);
-            this.workerUrl = null;
-          }
-        } else {
-          await this.worker.terminate();
-        }
-      } catch (error) {
-        logger.warn(`Failed to terminate worker: ${error}`);
-      }
-      this.worker = null;
+    if (!this.worker) {
+      return;
     }
-    this.messageHandlers = [];
-    this.errorHandlers = [];
-    this.pendingEvaluations.clear();
+    logger.info("Starting worker termination...");
+    try {
+      this.messageHandlers = [];
+      this.errorHandlers = [];
+      this.pendingEvaluations.clear();
+      if (this.isBrowser) {
+        logger.info("Terminating browser worker...");
+        this.worker.terminate();
+        if (this.workerUrl) {
+          logger.info("Revoking worker URL...");
+          URL.revokeObjectURL(this.workerUrl);
+          this.workerUrl = null;
+        }
+      } else {
+        logger.info("Terminating Node.js worker...");
+        const worker = this.worker;
+        await worker.terminate();
+      }
+    } catch (error) {
+      logger.warn(`Failed to terminate worker: ${error}`);
+    } finally {
+      this.worker = null;
+      logger.info("Worker termination complete");
+    }
   }
 };
 _WorkerEvaluator.EVALUATION_TIMEOUT_MS = 5e3;
@@ -918,6 +928,7 @@ var _WasmRunner = class _WasmRunner {
       this.instance.exports.run();
       await this.waitForWorkerCompletion();
     } catch (error) {
+      await this.destroy();
       throw new Error(`Failed to run WASM module: ${error}`);
     }
   }
@@ -941,6 +952,7 @@ var _WasmRunner = class _WasmRunner {
       this.instance.exports.runJSCode(strPtr);
       await this.waitForWorkerCompletion();
     } catch (error) {
+      await this.destroy();
       throw new Error(`Failed to run JavaScript code: ${error}`);
     }
   }
@@ -976,17 +988,58 @@ var _WasmRunner = class _WasmRunner {
    * Cleans up resources (e.g., terminates the worker).
    */
   async destroy() {
-    if (this.workerEvaluator) {
-      try {
-        await this.workerEvaluator.terminate();
-      } catch (error) {
-        console.warn(`Failed to terminate WorkerEvaluator: ${error}`);
-      }
-      this.workerEvaluator = null;
+    if (!this.workerEvaluator) {
+      return;
     }
-    this.instance = null;
+    try {
+      await this.workerEvaluator.terminate();
+      this.workerEvaluator = null;
+      if (this.instance) {
+        const exports = this.instance.exports;
+        if (exports.memory) {
+          try {
+            if (typeof exports.__collect === "function") {
+              exports.__collect();
+            }
+            if (typeof exports.__unpin === "function") {
+              exports.__unpin(0);
+            }
+            if (typeof exports.__free === "function") {
+              exports.__free(0);
+            }
+          } catch (error) {
+            logger.error(`WASM memory cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        this.instance = null;
+      }
+    } catch (error) {
+      logger.error(`Unexpected error during WASM cleanup: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    } finally {
+      if (typeof process !== "undefined" && process.stdout) {
+        try {
+          if (process.stdout) {
+            process.stdout.end();
+            process.stdout.destroy();
+          }
+          if (process.stderr) {
+            process.stderr.end();
+            process.stderr.destroy();
+          }
+        } catch (error) {
+          logger.error(`Error closing standard streams: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
   }
   async terminate() {
+    await this.destroy();
+  }
+  /**
+   * Cleans up all resources. Should be called after all operations are complete.
+   */
+  async cleanup() {
     await this.destroy();
   }
 };
@@ -999,5 +1052,6 @@ var initWasm = async (wasmSource) => {
 };
 export {
   WorkerEvaluator,
-  initWasm
+  initWasm,
+  logger
 };

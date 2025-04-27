@@ -42,14 +42,16 @@
     <div>
         <button id="runBtn">Run</button>
         <button id="runCustomBtn">Run Custom Code</button>
+        <button id="cleanupBtn">Cleanup</button>
     </div>
 
     <div id="output"></div>
 
     <script type="module">
         import { initWasm } from '/js/bundle.js';
+        import { logger } from '/js/bundle.js';
 
-        let wasmInstance;
+        let wasmInstance = null;
         const output = document.getElementById('output');
 
         // Override console.log to also display in our output div
@@ -60,19 +62,84 @@
         };
 
         // Initialize WASM
-        try {
-            console.log('Starting WASM initialization...');
-            wasmInstance = await initWasm('/js/index.wasm');
-            console.log('WASM module loaded successfully!');
-            console.log('WASM instance:', wasmInstance);
-        } catch (error) {
-            console.error('Failed to load WASM module:', error);
+        async function initializeWasm() {
+            if (wasmInstance) {
+                console.log('WASM instance already exists');
+                return;
+            }
+            try {
+                console.log('Starting WASM initialization...');
+                wasmInstance = await initWasm('/js/index.wasm');
+                console.log('WASM module loaded successfully!');
+                console.log('WASM instance:', wasmInstance);
+                
+                // Configure logger
+                logger.setLevel(0); // 0 = DEBUG level
+                console.log('Logger configured with DEBUG level');
+            } catch (error) {
+                console.error('Failed to load WASM module:', error);
+                wasmInstance = null;
+            }
         }
+
+        // Initialize WASM on page load
+        await initializeWasm();
+
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                console.log('Page is hidden, cleaning up...');
+                if (wasmInstance) {
+                    wasmInstance.terminate().catch(error => {
+                        console.error('Error during cleanup:', error);
+                    });
+                    wasmInstance = null;
+                }
+            }
+        });
+
+        // Handle page unload
+        window.addEventListener('beforeunload', (event) => {
+            console.log('Page is about to unload, cleaning up...');
+            if (wasmInstance) {
+                // Use a synchronous approach for beforeunload
+                const terminatePromise = wasmInstance.terminate();
+                // Prevent the default unload behavior until termination is complete
+                event.preventDefault();
+                event.returnValue = '';
+                // Force the termination to complete
+                terminatePromise.then(() => {
+                    // This might not execute, but we try anyway
+                    console.log('Cleanup completed');
+                }).catch(error => {
+                    console.error('Error during cleanup:', error);
+                });
+            }
+        });
+
+        // Add cleanup button handler
+        document.getElementById('cleanupBtn').addEventListener('click', async () => {
+            console.log('Cleanup button clicked');
+            if (wasmInstance) {
+                console.log('Terminating WASM instance...');
+                await wasmInstance.terminate();
+                wasmInstance = null;
+                console.log('WASM instance terminated and cleared');
+            } else {
+                console.log('No WASM instance to terminate');
+            }
+        });
 
         // Add event listeners
         document.getElementById('runBtn').addEventListener('click', async () => {
             console.log('Run button clicked');
             output.textContent = ''; // Clear previous output
+            
+            // Ensure WASM is initialized
+            if (!wasmInstance) {
+                await initializeWasm();
+            }
+            
             try {
                 console.log('Calling wasmInstance.run()...');
                 await wasmInstance.run();
@@ -85,6 +152,12 @@
         document.getElementById('runCustomBtn').addEventListener('click', async () => {
             console.log('Run Custom button clicked');
             output.textContent = ''; // Clear previous output
+            
+            // Ensure WASM is initialized
+            if (!wasmInstance) {
+                await initializeWasm();
+            }
+            
             const jsCode = document.getElementById('jsCode').value;
             console.log('Custom code to run:', jsCode);
             try {
