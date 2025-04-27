@@ -387,235 +387,254 @@ var Logger = class {
 var logger = new Logger();
 
 // src/worker-evaluator.ts
+var require2;
+var createRequire;
+var isNode = typeof window === "undefined";
+async function initializeNodeModules() {
+  if (isNode) {
+    const module = await import("module");
+    createRequire = module.createRequire;
+    require2 = createRequire(import.meta.url);
+  }
+}
 var _WorkerEvaluator = class _WorkerEvaluator {
-  constructor() {
+  constructor(sandboxConfig = {}) {
     this.worker = null;
-    this.messageHandlers = /* @__PURE__ */ new Map();
+    this.messageHandlers = [];
     this.errorHandlers = [];
     this.workerUrl = null;
-    // 5-second timeout for evaluations.
     this.pendingEvaluations = /* @__PURE__ */ new Map();
+    this.handlerCounter = 0;
     this.isBrowser = typeof window !== "undefined";
+    this.sandboxConfig = {
+      allowedModules: sandboxConfig.allowedModules || [],
+      blockedModules: sandboxConfig.blockedModules || [],
+      moduleProxies: sandboxConfig.moduleProxies || {},
+      preambleCode: sandboxConfig.preambleCode || "",
+      polyfills: sandboxConfig.polyfills || {}
+    };
+  }
+  /**
+   * Generates code for the process proxy.
+   */
+  generateProcessProxyCode() {
+    const processProxy = this.sandboxConfig.moduleProxies?.process;
+    if (!processProxy) return "";
+    const properties = Object.entries(processProxy).map(([key, value]) => {
+      if (typeof value === "function") {
+        try {
+          const result = value();
+          return `${key}: function() { return ${JSON.stringify(result)}; }`;
+        } catch (e) {
+          return `${key}: function() { return undefined; } // Function not serializable`;
+        }
+      }
+      return `${key}: ${JSON.stringify(value)}`;
+    });
+    return `
+      ${this.isBrowser ? "self" : "global"}.process = {
+        ${properties.join(",\n        ")}
+      };
+    `;
   }
   on(event, handler) {
+    const handlerId = this.handlerCounter++;
     if (event === "message") {
-      this.messageHandlers.set(handler.toString(), [
-        ...this.messageHandlers.get(handler.toString()) || [],
-        handler
-      ]);
+      this.messageHandlers.push(handler);
     } else {
       this.errorHandlers.push(handler);
     }
+    return handlerId;
   }
   off(event, handler) {
     if (event === "message") {
-      this.messageHandlers.delete(handler.toString());
+      this.messageHandlers = this.messageHandlers.filter((h) => h !== handler);
     } else {
       this.errorHandlers = this.errorHandlers.filter((h) => h !== handler);
     }
   }
   /**
-   * Initializes the worker.
-   * @throws Error if worker creation fails.
+   * Generates worker code with sandboxing logic.
+   */
+  generateWorkerCode() {
+    const { allowedModules, blockedModules, moduleProxies, preambleCode, polyfills } = this.sandboxConfig;
+    const processProxyCode = this.generateProcessProxyCode();
+    const sandboxCode = `
+      // Process proxy
+      ${processProxyCode}
+
+      // Polyfills for globals
+      const polyfills = ${JSON.stringify(polyfills)};
+      const globalObject = typeof self !== 'undefined' ? self : global;
+      Object.assign(globalObject, polyfills);
+
+      // Module resolution override
+      const originalRequire = typeof require === 'function' ? require : null;
+      const moduleProxies = ${JSON.stringify(moduleProxies)};
+      const allowedModules = ${JSON.stringify(allowedModules)};
+      const blockedModules = ${JSON.stringify(blockedModules)};
+
+      function customRequire(moduleName) {
+        if (blockedModules.includes(moduleName)) {
+          throw new Error(\`Module "\${moduleName}" is blocked\`);
+        }
+        if (!allowedModules.length || allowedModules.includes(moduleName)) {
+          if (moduleProxies[moduleName]) {
+            return moduleProxies[moduleName];
+          }
+          if (originalRequire) {
+            return originalRequire(moduleName);
+          }
+        }
+        throw new Error(\`Module "\${moduleName}" is not allowed\`);
+      }
+
+      // Override require (Node.js)
+      if (originalRequire) {
+        global.require = customRequire;
+      }
+
+      // Override import (browser)
+      if (typeof self !== 'undefined') {
+        self.importScripts = function() {
+          throw new Error('importScripts is disabled in sandbox');
+        };
+      }
+
+      // Preamble code
+      ${preambleCode}
+    `;
+    const workerCode = this.isBrowser ? `
+        ${sandboxCode}
+        self.onmessage = function(event) {
+          const { id, type, code } = event.data;
+          if (type !== 'evaluate') {
+            self.postMessage({
+              id,
+              type: 'complete',
+              success: false,
+              error: { message: 'Invalid message type' },
+              output: ''
+            });
+            return;
+          }
+
+          try {
+            const originalConsole = { ...console };
+            const capturedOutput = [];
+            console.log = (...args) => {
+              const output = args.join(' ');
+              capturedOutput.push(output);
+              originalConsole.log.apply(console, args);
+            };
+            console.error = (...args) => {
+              const output = 'ERROR: ' + args.join(' ');
+              capturedOutput.push(output);
+              originalConsole.error.apply(console, args);
+            };
+            console.warn = (...args) => {
+              const output = 'WARN: ' + args.join(' ');
+              capturedOutput.push(output);
+              originalConsole.warn.apply(console, args);
+            };
+
+            const fn = new Function(code);
+            fn();
+
+            self.postMessage({
+              id,
+              type: 'complete',
+              success: true,
+              error: null,
+              output: capturedOutput.join('\\n')
+            });
+          } catch (error) {
+            self.postMessage({
+              id,
+              type: 'complete',
+              success: false,
+              error: { message: error.message, stack: error.stack, name: error.name },
+              output: ''
+            });
+          }
+        };
+      ` : `
+        const { parentPort } = require('worker_threads');
+        ${sandboxCode}
+        parentPort.on('message', (message) => {
+          const { id, type, code } = message;
+          if (type !== 'evaluate') {
+            parentPort.postMessage({
+              id,
+              type: 'complete',
+              success: false,
+              error: { message: 'Invalid message type' },
+              output: ''
+            });
+            return;
+          }
+
+          try {
+            const originalConsole = { ...console };
+            const capturedOutput = [];
+            console.log = (...args) => {
+              const output = args.join(' ');
+              capturedOutput.push(output);
+              originalConsole.log.apply(console, args);
+            };
+            console.error = (...args) => {
+              const output = 'ERROR: ' + args.join(' ');
+              capturedOutput.push(output);
+              originalConsole.error.apply(console, args);
+            };
+            console.warn = (...args) => {
+              const output = 'WARN: ' + args.join(' ');
+              capturedOutput.push(output);
+              originalConsole.warn.apply(console, args);
+            };
+
+            const fn = new Function(code);
+            fn();
+
+            parentPort.postMessage({
+              id,
+              type: 'complete',
+              success: true,
+              error: null,
+              output: capturedOutput.join('\\n')
+            });
+          } catch (error) {
+            parentPort.postMessage({
+              id,
+              type: 'complete',
+              success: false,
+              error: { message: error.message, stack: error.stack, name: error.name },
+              output: ''
+            });
+          }
+        });
+      `;
+    return workerCode;
+  }
+  /**
+   * Initializes the worker with sandboxed environment.
    */
   async initialize() {
     if (this.worker) {
       throw new Error("Worker already initialized");
     }
     try {
+      await initializeNodeModules();
+      const workerCode = this.generateWorkerCode();
       if (this.isBrowser) {
-        const workerCode = `
-          // Worker code
-          self.onmessage = function(event) {
-            const { id, type, code } = event.data;
-            if (type !== 'evaluate') {
-              self.postMessage({
-                id,
-                type: 'complete',
-                success: false,
-                error: 'Invalid message type',
-                output: ''
-              });
-              return;
-            }
-
-            try {
-              // Override console methods to capture output
-              const originalConsole = { ...console };
-              const capturedOutput = [];
-              
-              console.log = (...args) => {
-                const output = args.join(' ');
-                capturedOutput.push(output);
-                originalConsole.log.apply(console, args);
-              };
-              console.error = (...args) => {
-                const output = 'ERROR: ' + args.join(' ');
-                capturedOutput.push(output);
-                originalConsole.error.apply(console, args);
-              };
-              console.warn = (...args) => {
-                const output = 'WARN: ' + args.join(' ');
-                capturedOutput.push(output);
-                originalConsole.warn.apply(console, args);
-              };
-
-              // Evaluate the code
-              const fn = new Function(code);
-              fn();
-
-              self.postMessage({
-                id,
-                type: 'complete',
-                success: true,
-                error: null,
-                output: capturedOutput.join('\\n')
-              });
-            } catch (error) {
-              self.postMessage({
-                id,
-                type: 'complete',
-                success: false,
-                error: error.message || 'Unknown error',
-                output: ''
-              });
-            }
-          };
-        `;
         const blob = new Blob([workerCode], { type: "application/javascript" });
         this.workerUrl = URL.createObjectURL(blob);
         this.worker = new globalThis.Worker(this.workerUrl);
       } else {
         const { Worker } = await import("worker_threads");
-        const { writeFileSync, unlinkSync } = await import("fs");
-        const { tmpdir } = await import("os");
-        const { join } = await import("path");
-        const workerCode = `
-          const { parentPort } = require('worker_threads');
-
-          // Simple logger implementation for the worker
-          const logger = {
-            debug: (...args) => parentPort.postMessage({ type: 'log', level: 'debug', args }),
-            info: (...args) => parentPort.postMessage({ type: 'log', level: 'info', args }),
-            warn: (...args) => parentPort.postMessage({ type: 'log', level: 'warn', args }),
-            error: (...args) => parentPort.postMessage({ type: 'log', level: 'error', args })
-          };
-
-          parentPort.on('message', (message) => {
-            const { id, type, code } = message;
-            if (type !== 'evaluate') {
-              parentPort.postMessage({
-                id,
-                type: 'complete',
-                success: false,
-                error: 'Invalid message type',
-                output: ''
-              });
-              return;
-            }
-
-            try {
-              // Override console methods to capture output
-              const originalConsole = { ...console };
-              const capturedOutput = [];
-              
-              console.log = (...args) => {
-                const output = args.join(' ');
-                capturedOutput.push(output);
-                originalConsole.log.apply(console, args);
-              };
-              console.error = (...args) => {
-                const output = 'ERROR: ' + args.join(' ');
-                capturedOutput.push(output);
-                originalConsole.error.apply(console, args);
-              };
-              console.warn = (...args) => {
-                const output = 'WARN: ' + args.join(' ');
-                capturedOutput.push(output);
-                originalConsole.warn.apply(console, args);
-              };
-
-              // Evaluate the code
-              const fn = new Function(code);
-              fn();
-
-              parentPort.postMessage({
-                id,
-                type: 'complete',
-                success: true,
-                error: null,
-                output: capturedOutput.join('\\n')
-              });
-            } catch (error) {
-              parentPort.postMessage({
-                id,
-                type: 'complete',
-                success: false,
-                error: error.message || 'Unknown error',
-                output: ''
-              });
-            }
-          });
-        `;
-        const workerPath = join(tmpdir(), `worker-${Date.now()}.js`);
-        writeFileSync(workerPath, workerCode);
-        this.worker = new Worker(workerPath);
-        this.worker.on("exit", () => {
-          try {
-            unlinkSync(workerPath);
-          } catch (error) {
-            logger.warn("Failed to clean up temporary worker file:", error);
-          }
-        });
+        this.worker = new Worker(workerCode, { eval: true });
       }
-      if (this.isBrowser) {
-        this.worker.addEventListener("error", (event) => {
-          logger.error("Worker error:", event);
-          this.notifyErrorHandlers(new Error(`Worker error: ${event.message}`));
-        });
-        this.worker.addEventListener("message", (event) => {
-          const data = event.data;
-          if (data.type === "log") {
-            switch (data.level) {
-              case "debug":
-                logger.debug(...data.args);
-                break;
-              case "info":
-                logger.info(...data.args);
-                break;
-              case "warn":
-                logger.warn(...data.args);
-                break;
-              case "error":
-                logger.error(...data.args);
-                break;
-            }
-          }
-        });
-      } else {
-        this.worker.on("error", (error) => {
-          logger.error("Worker error:", error);
-          this.notifyErrorHandlers(error);
-        });
-        this.worker.on("message", (data) => {
-          if (data.type === "log") {
-            switch (data.level) {
-              case "debug":
-                logger.debug(...data.args);
-                break;
-              case "info":
-                logger.info(...data.args);
-                break;
-              case "warn":
-                logger.warn(...data.args);
-                break;
-              case "error":
-                logger.error(...data.args);
-                break;
-            }
-          }
-        });
-      }
+      this.setupListeners();
     } catch (error) {
       logger.error("Failed to initialize worker:", error);
       await this.terminate();
@@ -623,90 +642,116 @@ var _WorkerEvaluator = class _WorkerEvaluator {
     }
   }
   /**
-   * Synchronously evaluates JavaScript code by queuing it for worker execution.
-   * Uses callbacks to notify WASM of completion (since true sync evaluation is infeasible).
-   * @param code The JavaScript code to evaluate.
-   * @throws Error if the worker is not initialized or code is invalid.
+   * Sets up persistent listeners.
    */
-  evaluateSync(code) {
-    logger.debug("WorkerEvaluator: Starting evaluateSync with code:", code);
+  setupListeners() {
+    if (this.isBrowser) {
+      this.worker.addEventListener("error", (event) => {
+        logger.error("Worker error:", event);
+        this.notifyErrorHandlers(new Error(`Worker error: ${event.message}`));
+      });
+      this.worker.addEventListener("message", (event) => {
+        this.handleWorkerMessage(event.data);
+      });
+    } else {
+      this.worker.on("error", (error) => {
+        logger.error("Worker error:", error);
+        this.notifyErrorHandlers(error);
+      });
+      this.worker.on("message", (data) => {
+        this.handleWorkerMessage(data);
+      });
+    }
+  }
+  /**
+   * Preprocesses code before evaluation.
+   */
+  preprocessCode(code) {
+    let transformedCode = code;
+    const importRegex = /import\s+.*?\s+from\s+['"](.*?)['"]/g;
+    transformedCode = transformedCode.replace(importRegex, () => {
+      throw new Error("Dynamic imports are disabled in sandbox");
+    });
+    return transformedCode;
+  }
+  /**
+   * Evaluates code with callbacks.
+   */
+  evaluateWithCallback(code) {
     if (!this.worker) {
       throw new Error("Worker not initialized");
     }
-    if (!code) {
-      throw new Error("JavaScript code cannot be empty");
+    if (!code || typeof code !== "string") {
+      throw new Error("JavaScript code must be a non-empty string");
     }
+    if (code.length > 1e4) {
+      throw new Error("Code exceeds maximum length of 10,000 characters");
+    }
+    const preprocessedCode = this.preprocessCode(code);
     const id = `${Date.now()}-${Math.random()}`;
-    logger.debug("WorkerEvaluator: Generated message ID:", id);
-    const message = { id, type: "evaluate", code };
+    const message = { id, type: "evaluate", code: preprocessedCode };
     const messageHandler = (response) => {
-      logger.debug("WorkerEvaluator: Received response:", JSON.stringify(response, null, 2));
       if (response.id === id) {
-        logger.debug("WorkerEvaluator: Processing response for ID:", id);
         this.off("message", messageHandler);
         const pending = this.pendingEvaluations.get(id);
         if (pending) {
           if (response.success) {
-            logger.debug("WorkerEvaluator: Success response, displaying output:", response.output);
             if (response.output) {
               logger.info(response.output);
             }
             pending.resolve();
           } else {
-            logger.error("WorkerEvaluator: Error response:", response.error);
-            pending.reject(new Error(response.error || "Unknown error"));
+            pending.reject(new Error(response.error?.message || "Unknown error"));
           }
           this.pendingEvaluations.delete(id);
         }
         this.notifyMessageHandlers(response);
       }
     };
-    logger.debug("WorkerEvaluator: Registering message handler and sending message");
     this.on("message", messageHandler);
     this.worker.postMessage(message);
-    if (!this.pendingEvaluations.has(id)) {
-      logger.debug("WorkerEvaluator: Setting up message listener");
-      if (this.isBrowser) {
-        this.worker.addEventListener("message", (event) => {
-          logger.debug("WorkerEvaluator: Received browser worker message:", JSON.stringify(event.data, null, 2));
-          this.handleWorkerMessage(event.data);
-        }, { once: true });
-      } else {
-        this.worker.once("message", (data) => {
-          logger.debug("WorkerEvaluator: Received Node.js worker message:", JSON.stringify(data, null, 2));
-          this.handleWorkerMessage(data);
-        });
+    setTimeout(() => {
+      if (this.pendingEvaluations.has(id)) {
+        this.off("message", messageHandler);
+        const pending = this.pendingEvaluations.get(id);
+        if (pending) {
+          pending.reject(new Error("Callback evaluation timed out"));
+          this.pendingEvaluations.delete(id);
+        }
       }
-    }
+    }, _WorkerEvaluator.EVALUATION_TIMEOUT_MS);
   }
   /**
-   * Asynchronously evaluates JavaScript code (for non-WASM use cases).
-   * @param code The JavaScript code to evaluate.
-   * @returns A promise that resolves on success or rejects on failure.
+   * Asynchronously evaluates code.
    */
   async evaluate(code) {
     if (!this.worker) {
       throw new Error("Worker not initialized");
     }
-    if (!code) {
-      throw new Error("JavaScript code cannot be empty");
+    if (!code || typeof code !== "string") {
+      throw new Error("JavaScript code must be a non-empty string");
     }
+    if (code.length > 1e4) {
+      throw new Error("Code exceeds maximum length of 10,000 characters");
+    }
+    const preprocessedCode = this.preprocessCode(code);
     const id = `${Date.now()}-${Math.random()}`;
     return new Promise((resolve, reject) => {
       this.pendingEvaluations.set(id, { resolve, reject });
-      const timeout = setTimeout(() => {
-        this.pendingEvaluations.delete(id);
-        reject(new Error("Worker evaluation timed out"));
+      setTimeout(() => {
+        if (this.pendingEvaluations.has(id)) {
+          this.pendingEvaluations.delete(id);
+          reject(new Error("Worker evaluation timed out"));
+        }
       }, _WorkerEvaluator.EVALUATION_TIMEOUT_MS);
-      this.worker.postMessage({ id, type: "evaluate", code });
+      this.worker.postMessage({ id, type: "evaluate", code: preprocessedCode });
     });
   }
   /**
-   * Handles incoming worker messages.
-   * @param data The worker's response.
+   * Handles worker messages.
    */
   handleWorkerMessage(data) {
-    if (!data || typeof data !== "object" || !data.id || data.type !== "complete" || typeof data.success !== "boolean" || typeof data.error !== "string" && data.error !== null || typeof data.output !== "string") {
+    if (!data || typeof data !== "object" || !data.id || data.type !== "complete") {
       this.notifyErrorHandlers(new Error("Invalid worker response format"));
       return;
     }
@@ -718,30 +763,26 @@ var _WorkerEvaluator = class _WorkerEvaluator {
         }
         pending.resolve();
       } else {
-        pending.reject(new Error(data.error || "Unknown error"));
+        pending.reject(new Error(data.error?.message || "Unknown error"));
       }
       this.pendingEvaluations.delete(data.id);
     }
     this.notifyMessageHandlers(data);
   }
   /**
-   * Notifies message handlers with the response.
-   * @param response The worker's response.
+   * Notifies message handlers.
    */
   notifyMessageHandlers(response) {
-    this.messageHandlers.forEach((handlers) => {
-      handlers.forEach((handler) => handler(response));
-    });
+    this.messageHandlers.forEach((handler) => handler(response));
   }
   /**
-   * Notifies error handlers with the error.
-   * @param error The error to report.
+   * Notifies error handlers.
    */
   notifyErrorHandlers(error) {
     this.errorHandlers.forEach((handler) => handler(error));
   }
   /**
-   * Terminates the worker and cleans up resources.
+   * Terminates the worker.
    */
   async terminate() {
     if (this.worker) {
@@ -760,7 +801,7 @@ var _WorkerEvaluator = class _WorkerEvaluator {
       }
       this.worker = null;
     }
-    this.messageHandlers.clear();
+    this.messageHandlers = [];
     this.errorHandlers = [];
     this.pendingEvaluations.clear();
   }
@@ -781,7 +822,15 @@ var _WasmRunner = class _WasmRunner {
    * @throws Error if initialization fails.
    */
   async initialize(wasmSource) {
-    this.workerEvaluator = new WorkerEvaluator();
+    this.workerEvaluator = new WorkerEvaluator({
+      moduleProxies: {
+        process: {
+          cwd: () => "/mocked/cwd/path",
+          platform: "mocked-platform",
+          env: { NODE_ENV: "sandbox" }
+        }
+      }
+    });
     try {
       await this.workerEvaluator.initialize();
     } catch (error) {
@@ -804,7 +853,7 @@ var _WasmRunner = class _WasmRunner {
           }
           const rawBytes = new Uint8Array(memory.buffer, ptr, length);
           const jsCode = new TextDecoder().decode(rawBytes).trim();
-          this.workerEvaluator.evaluateSync(jsCode);
+          this.workerEvaluator.evaluateWithCallback(jsCode);
         },
         __new: (size, id) => this.instance.exports.__new(size, id),
         __pin: (ptr) => this.instance.exports.__pin(ptr),
@@ -906,14 +955,14 @@ var _WasmRunner = class _WasmRunner {
           return;
         }
         this.workerEvaluator.off("message", messageHandler);
-        if (!msg || typeof msg !== "object" || !msg.id || msg.type !== "complete" || typeof msg.success !== "boolean" || typeof msg.error !== "string" && msg.error !== null || typeof msg.output !== "string") {
+        if (!msg || typeof msg !== "object" || !msg.id || msg.type !== "complete" || typeof msg.success !== "boolean" || msg.error !== null && (typeof msg.error !== "object" || !msg.error.message) || typeof msg.output !== "string") {
           reject(new Error("Invalid worker response format"));
           return;
         }
         if (msg.success) {
           resolve();
         } else {
-          reject(new Error(msg.error || "Unknown error"));
+          reject(new Error(msg.error?.message || "Unknown error"));
         }
       };
       this.workerEvaluator.on("message", messageHandler);

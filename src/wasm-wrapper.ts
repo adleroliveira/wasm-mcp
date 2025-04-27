@@ -32,7 +32,15 @@ export class WasmRunner {
    */
   async initialize(wasmSource: string | ArrayBuffer | Uint8Array): Promise<void> {
     // Initialize worker evaluator.
-    this.workerEvaluator = new WorkerEvaluator();
+    this.workerEvaluator = new WorkerEvaluator({
+      moduleProxies: {
+        process: {
+          cwd: () => '/mocked/cwd/path',
+          platform: 'mocked-platform',
+          env: { NODE_ENV: 'sandbox' }
+        }
+      }
+    });
     try {
       await this.workerEvaluator.initialize();
     } catch (error) {
@@ -59,7 +67,7 @@ export class WasmRunner {
           const jsCode = new TextDecoder().decode(rawBytes).trim();
           // Note: evaluate is synchronous to match AssemblyScript declaration.
           // WorkerEvaluator must handle async execution internally.
-          this.workerEvaluator!.evaluateSync(jsCode);
+          this.workerEvaluator!.evaluateWithCallback(jsCode);
         },
         __new: (size: number, id: number) => this.instance!.exports.__new(size, id),
         __pin: (ptr: number) => this.instance!.exports.__pin(ptr),
@@ -183,7 +191,7 @@ export class WasmRunner {
           !msg.id ||
           msg.type !== 'complete' ||
           typeof msg.success !== 'boolean' ||
-          typeof msg.error !== 'string' && msg.error !== null ||
+          (msg.error !== null && (typeof msg.error !== 'object' || !msg.error.message)) ||
           typeof msg.output !== 'string') {
           reject(new Error('Invalid worker response format'));
           return;
@@ -191,7 +199,7 @@ export class WasmRunner {
         if (msg.success) {
           resolve();
         } else {
-          reject(new Error(msg.error || 'Unknown error'));
+          reject(new Error(msg.error?.message || 'Unknown error'));
         }
       };
 

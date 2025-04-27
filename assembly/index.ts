@@ -25,7 +25,11 @@ const NULL_TERMINATOR_SIZE: i32 = 1; // Size of null terminator in UTF-8 encoded
 const MAX_JS_CODE_SIZE: i32 = 1024 * 1024; // 1MB max JavaScript code size to prevent overflow.
 
 // Hardcoded JavaScript code for testing.
-const HARDCODED_JS_CODE: string = "console.log('Hello from WASM!');";
+const HARDCODED_JS_CODE: string = `
+  console.log('Testing process.cwd():', process.cwd());
+  console.log('Testing process.env:', process.env);
+  console.log('Testing process.platform:', process.platform);
+`;
 
 /**
  * Executes JavaScript code by encoding it to UTF-8, allocating WASM memory, and passing it to the host's evaluate function.
