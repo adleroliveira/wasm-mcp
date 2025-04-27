@@ -6,7 +6,9 @@
   "scripts": {
     "build:ts": "tsc",
     "build:as": "npx asc assembly/index.ts --config asconfig.json --target debug && npx wat2wasm build/debug.wat -o build/debug.wasm",
-    "build": "npm run build:ts && npm run build:as",
+    "build:browser": "node scripts/build-browser.js && npm run copy:wasm",
+    "copy:wasm": "cp build/debug.wasm public/js/index.wasm",
+    "build": "npm run build:ts && npm run build:as && npm run build:browser",
     "build:tests": "npm run build:as && tsc -p tests/tsconfig.json && cp -r build dist/",
     "test:node": "npm run build:tests && node dist/tests/node/index.js",
     "test:browser": "echo 'Open tests/browser/index.html in your browser'",
@@ -14,13 +16,14 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "dev": "ts-node src/index.ts",
-    "asbuild:debug": "asc assembly/index.ts --target debug",
-    "asbuild:release": "asc assembly/index.ts --target release",
+    "asbuild:debug": "npm run build:ts && asc assembly/index.ts --target debug",
+    "asbuild:release": "npm run build:ts && asc assembly/index.ts --target release",
     "asbuild": "npm run asbuild:debug && npm run asbuild:release",
-    "start": "npx serve .",
-    "test:wasm": "npm run asbuild && tsc -p src/tests/tsconfig.json && node dist/tests/wasm-test.js"
+    "start": "npx serve public",
+    "test:wasm": "npm run build && node dist/wasm-test.js"
   },
   "dependencies": {
+    "@assemblyscript/loader": "^0.27.36",
     "acorn": "^8.14.1",
     "acorn-walk": "^8.3.4",
     "assemblyscript": "^0.27.36",

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM MCP Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 150px;
+            margin: 10px 0;
+            padding: 8px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        #output {
+            background: #f4f4f4;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>WASM MCP Test</h1>
+    
+    <div>
+        <h3>JavaScript Code:</h3>
+        <textarea id="jsCode">console.log('Hello from JavaScript!');</textarea>
+    </div>
+
+    <div>
+        <button id="runHardcodedBtn">Run Hardcoded Code</button>
+        <button id="runCustomBtn">Run Custom Code</button>
+    </div>
+
+    <div id="output"></div>
+
+    <script type="module">
+        import { initWasm } from '/js/bundle.js';
+
+        let wasmInstance;
+        const output = document.getElementById('output');
+
+        // Override console.log to also display in our output div
+        const originalLog = console.log;
+        console.log = (...args) => {
+            originalLog.apply(console, args);
+            output.textContent += args.join(' ') + '\n';
+        };
+
+        // Initialize WASM
+        try {
+            wasmInstance = await initWasm('/js/index.wasm');
+            console.log('WASM module loaded successfully!');
+        } catch (error) {
+            console.error('Failed to load WASM module:', error);
+        }
+
+        // Add event listeners
+        document.getElementById('runHardcodedBtn').addEventListener('click', async () => {
+            output.textContent = ''; // Clear previous output
+            try {
+                await wasmInstance.runHardcodedJSCode();
+                console.log('Hardcoded code executed successfully!');
+            } catch (error) {
+                console.error('Error running hardcoded code:', error);
+            }
+        });
+
+        document.getElementById('runCustomBtn').addEventListener('click', async () => {
+            output.textContent = ''; // Clear previous output
+            const jsCode = document.getElementById('jsCode').value;
+            try {
+                await wasmInstance.runJSCode(jsCode);
+                console.log('Custom code executed successfully!');
+            } catch (error) {
+                console.error('Error running custom code:', error);
+            }
+        });
+    </script>
+</body>
+</html> 

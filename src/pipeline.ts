@@ -1,8 +1,8 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { Installer, MCPServerConfig } from './installer';
-import { Bundler } from './bundler';
-import { Analyzer } from './analyzer';
+import { Installer, MCPServerConfig } from './installer.js';
+import { Bundler } from './bundler.js';
+import { Analyzer } from './analyzer.js';
 
 export interface PipelineOptions {
   debugDir?: string;

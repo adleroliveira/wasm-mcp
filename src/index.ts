@@ -3,8 +3,8 @@ import path from 'path';
 
 import { Command } from 'commander';
 
-import { Pipeline } from './pipeline';
-import { MCPServerConfig } from './installer';
+import { Pipeline } from './pipeline.js';
+import { MCPServerConfig } from './installer.js';
 
 interface RawConfig {
   mcpServers?: {
