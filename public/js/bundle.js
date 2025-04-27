@@ -63,8 +63,8 @@ function preInstantiate(imports) {
   imports.Date = imports.Date || Date;
   return extendedExports;
 }
-function postInstantiate(extendedExports, instance2) {
-  const exports = instance2.exports;
+function postInstantiate(extendedExports, instance) {
+  const exports = instance.exports;
   const memory = exports.memory;
   const table = exports.table;
   const __new = exports.__new || F_NO_EXPORT_RUNTIME;
@@ -252,9 +252,9 @@ async function instantiate(source, imports = {}) {
   if (isResponse(source = await source)) return instantiateStreaming(source, imports);
   const module = isModule(source) ? source : await WebAssembly.compile(source);
   const extended = preInstantiate(imports);
-  const instance2 = await WebAssembly.instantiate(module, imports);
-  const exports = postInstantiate(extended, instance2);
-  return { module, instance: instance2, exports };
+  const instance = await WebAssembly.instantiate(module, imports);
+  const exports = postInstantiate(extended, instance);
+  return { module, instance, exports };
 }
 async function instantiateStreaming(source, imports = {}) {
   if (!WebAssembly.instantiateStreaming) {
@@ -355,191 +355,599 @@ function demangle(exports, extendedExports = {}) {
   return extendedExports;
 }
 
-// src/worker-evaluator.ts
-var WorkerEvaluator = class {
+// src/logger.ts
+var Logger = class {
   constructor() {
-    this.worker = null;
-    this.messageHandlers = /* @__PURE__ */ new Set();
-    this.isBrowser = typeof window !== "undefined";
+    this.level = 1 /* INFO */;
   }
-  on(event, handler) {
-    this.messageHandlers.add(handler);
+  setLevel(level) {
+    this.level = level;
   }
-  notifyMessageHandlers() {
-    this.messageHandlers.forEach((handler) => handler());
-  }
-  async initialize() {
-    if (this.isBrowser) {
-      const workerCode = `
-        onmessage = (event) => {
-          const { type, code } = event.data;
-          if (type === 'evaluate') {
-            try {
-              const fn = new Function(code);
-              fn();
-              postMessage({ success: true, error: null });
-            } catch (error) {
-              postMessage({ success: false, error: error.message });
-            }
-          }
-        };
-      `;
-      const blob = new Blob([workerCode], { type: "application/javascript" });
-      const workerUrl = URL.createObjectURL(blob);
-      this.worker = new globalThis.Worker(workerUrl);
-    } else {
-      const { Worker } = await import("worker_threads");
-      const workerPath = new URL("./worker-code.js", import.meta.url).pathname.replace("src/", "dist/");
-      try {
-        this.worker = new Worker(workerPath);
-      } catch (error) {
-        console.error("Failed to create worker:", error);
-        throw error;
-      }
+  debug(...args) {
+    if (this.level <= 0 /* DEBUG */) {
+      console.debug("[DEBUG]", ...args);
     }
   }
-  async evaluate(code) {
-    if (!this.worker) {
-      console.log("Worker not initialized, initializing now...");
-      await this.initialize();
+  info(...args) {
+    if (this.level <= 1 /* INFO */) {
+      console.info("[INFO]", ...args);
     }
-    return new Promise((resolve, reject) => {
-      if (!this.worker) {
-        reject(new Error("Worker not initialized"));
-        return;
-      }
-      const messageHandler = (event) => {
-        let response;
-        if (this.isBrowser) {
-          response = event.data;
-        } else {
-          response = event;
-        }
-        if (!response || typeof response !== "object") {
-          console.error("Invalid response format:", response);
-          console.error("Event structure:", event);
-          reject(new Error("Invalid worker response format"));
-          return;
-        }
-        if (this.isBrowser) {
-          this.worker.removeEventListener("message", messageHandler);
-        } else {
-          this.worker.removeListener("message", messageHandler);
-        }
-        this.notifyMessageHandlers();
-        if (response.success) {
-          resolve();
-        } else {
-          reject(new Error(response.error || "Unknown error"));
-        }
-      };
-      if (this.isBrowser) {
-        this.worker.addEventListener("message", messageHandler);
-      } else {
-        this.worker.on("message", messageHandler);
-      }
-      this.worker.postMessage({ type: "evaluate", code });
-    });
   }
-  terminate() {
-    if (this.worker) {
-      this.worker.terminate();
-      this.worker = null;
+  warn(...args) {
+    if (this.level <= 2 /* WARN */) {
+      console.warn("[WARN]", ...args);
+    }
+  }
+  error(...args) {
+    if (this.level <= 3 /* ERROR */) {
+      console.error("[ERROR]", ...args);
     }
   }
 };
+var logger = new Logger();
+
+// src/worker-evaluator.ts
+var _WorkerEvaluator = class _WorkerEvaluator {
+  constructor() {
+    this.worker = null;
+    this.messageHandlers = /* @__PURE__ */ new Map();
+    this.errorHandlers = [];
+    this.workerUrl = null;
+    // 5-second timeout for evaluations.
+    this.pendingEvaluations = /* @__PURE__ */ new Map();
+    this.isBrowser = typeof window !== "undefined";
+  }
+  on(event, handler) {
+    if (event === "message") {
+      this.messageHandlers.set(handler.toString(), [
+        ...this.messageHandlers.get(handler.toString()) || [],
+        handler
+      ]);
+    } else {
+      this.errorHandlers.push(handler);
+    }
+  }
+  off(event, handler) {
+    if (event === "message") {
+      this.messageHandlers.delete(handler.toString());
+    } else {
+      this.errorHandlers = this.errorHandlers.filter((h) => h !== handler);
+    }
+  }
+  /**
+   * Initializes the worker.
+   * @throws Error if worker creation fails.
+   */
+  async initialize() {
+    if (this.worker) {
+      throw new Error("Worker already initialized");
+    }
+    try {
+      if (this.isBrowser) {
+        const workerCode = `
+          // Worker code
+          self.onmessage = function(event) {
+            const { id, type, code } = event.data;
+            if (type !== 'evaluate') {
+              self.postMessage({
+                id,
+                type: 'complete',
+                success: false,
+                error: 'Invalid message type',
+                output: ''
+              });
+              return;
+            }
+
+            try {
+              // Override console methods to capture output
+              const originalConsole = { ...console };
+              const capturedOutput = [];
+              
+              console.log = (...args) => {
+                const output = args.join(' ');
+                capturedOutput.push(output);
+                originalConsole.log.apply(console, args);
+              };
+              console.error = (...args) => {
+                const output = 'ERROR: ' + args.join(' ');
+                capturedOutput.push(output);
+                originalConsole.error.apply(console, args);
+              };
+              console.warn = (...args) => {
+                const output = 'WARN: ' + args.join(' ');
+                capturedOutput.push(output);
+                originalConsole.warn.apply(console, args);
+              };
+
+              // Evaluate the code
+              const fn = new Function(code);
+              fn();
+
+              self.postMessage({
+                id,
+                type: 'complete',
+                success: true,
+                error: null,
+                output: capturedOutput.join('\\n')
+              });
+            } catch (error) {
+              self.postMessage({
+                id,
+                type: 'complete',
+                success: false,
+                error: error.message || 'Unknown error',
+                output: ''
+              });
+            }
+          };
+        `;
+        const blob = new Blob([workerCode], { type: "application/javascript" });
+        this.workerUrl = URL.createObjectURL(blob);
+        this.worker = new globalThis.Worker(this.workerUrl);
+      } else {
+        const { Worker } = await import("worker_threads");
+        const { writeFileSync, unlinkSync } = await import("fs");
+        const { tmpdir } = await import("os");
+        const { join } = await import("path");
+        const workerCode = `
+          const { parentPort } = require('worker_threads');
+
+          // Simple logger implementation for the worker
+          const logger = {
+            debug: (...args) => parentPort.postMessage({ type: 'log', level: 'debug', args }),
+            info: (...args) => parentPort.postMessage({ type: 'log', level: 'info', args }),
+            warn: (...args) => parentPort.postMessage({ type: 'log', level: 'warn', args }),
+            error: (...args) => parentPort.postMessage({ type: 'log', level: 'error', args })
+          };
+
+          parentPort.on('message', (message) => {
+            const { id, type, code } = message;
+            if (type !== 'evaluate') {
+              parentPort.postMessage({
+                id,
+                type: 'complete',
+                success: false,
+                error: 'Invalid message type',
+                output: ''
+              });
+              return;
+            }
+
+            try {
+              // Override console methods to capture output
+              const originalConsole = { ...console };
+              const capturedOutput = [];
+              
+              console.log = (...args) => {
+                const output = args.join(' ');
+                capturedOutput.push(output);
+                originalConsole.log.apply(console, args);
+              };
+              console.error = (...args) => {
+                const output = 'ERROR: ' + args.join(' ');
+                capturedOutput.push(output);
+                originalConsole.error.apply(console, args);
+              };
+              console.warn = (...args) => {
+                const output = 'WARN: ' + args.join(' ');
+                capturedOutput.push(output);
+                originalConsole.warn.apply(console, args);
+              };
+
+              // Evaluate the code
+              const fn = new Function(code);
+              fn();
+
+              parentPort.postMessage({
+                id,
+                type: 'complete',
+                success: true,
+                error: null,
+                output: capturedOutput.join('\\n')
+              });
+            } catch (error) {
+              parentPort.postMessage({
+                id,
+                type: 'complete',
+                success: false,
+                error: error.message || 'Unknown error',
+                output: ''
+              });
+            }
+          });
+        `;
+        const workerPath = join(tmpdir(), `worker-${Date.now()}.js`);
+        writeFileSync(workerPath, workerCode);
+        this.worker = new Worker(workerPath);
+        this.worker.on("exit", () => {
+          try {
+            unlinkSync(workerPath);
+          } catch (error) {
+            logger.warn("Failed to clean up temporary worker file:", error);
+          }
+        });
+      }
+      if (this.isBrowser) {
+        this.worker.addEventListener("error", (event) => {
+          logger.error("Worker error:", event);
+          this.notifyErrorHandlers(new Error(`Worker error: ${event.message}`));
+        });
+        this.worker.addEventListener("message", (event) => {
+          const data = event.data;
+          if (data.type === "log") {
+            switch (data.level) {
+              case "debug":
+                logger.debug(...data.args);
+                break;
+              case "info":
+                logger.info(...data.args);
+                break;
+              case "warn":
+                logger.warn(...data.args);
+                break;
+              case "error":
+                logger.error(...data.args);
+                break;
+            }
+          }
+        });
+      } else {
+        this.worker.on("error", (error) => {
+          logger.error("Worker error:", error);
+          this.notifyErrorHandlers(error);
+        });
+        this.worker.on("message", (data) => {
+          if (data.type === "log") {
+            switch (data.level) {
+              case "debug":
+                logger.debug(...data.args);
+                break;
+              case "info":
+                logger.info(...data.args);
+                break;
+              case "warn":
+                logger.warn(...data.args);
+                break;
+              case "error":
+                logger.error(...data.args);
+                break;
+            }
+          }
+        });
+      }
+    } catch (error) {
+      logger.error("Failed to initialize worker:", error);
+      await this.terminate();
+      throw new Error(`Failed to initialize worker: ${error}`);
+    }
+  }
+  /**
+   * Synchronously evaluates JavaScript code by queuing it for worker execution.
+   * Uses callbacks to notify WASM of completion (since true sync evaluation is infeasible).
+   * @param code The JavaScript code to evaluate.
+   * @throws Error if the worker is not initialized or code is invalid.
+   */
+  evaluateSync(code) {
+    logger.debug("WorkerEvaluator: Starting evaluateSync with code:", code);
+    if (!this.worker) {
+      throw new Error("Worker not initialized");
+    }
+    if (!code) {
+      throw new Error("JavaScript code cannot be empty");
+    }
+    const id = `${Date.now()}-${Math.random()}`;
+    logger.debug("WorkerEvaluator: Generated message ID:", id);
+    const message = { id, type: "evaluate", code };
+    const messageHandler = (response) => {
+      logger.debug("WorkerEvaluator: Received response:", JSON.stringify(response, null, 2));
+      if (response.id === id) {
+        logger.debug("WorkerEvaluator: Processing response for ID:", id);
+        this.off("message", messageHandler);
+        const pending = this.pendingEvaluations.get(id);
+        if (pending) {
+          if (response.success) {
+            logger.debug("WorkerEvaluator: Success response, displaying output:", response.output);
+            if (response.output) {
+              logger.info(response.output);
+            }
+            pending.resolve();
+          } else {
+            logger.error("WorkerEvaluator: Error response:", response.error);
+            pending.reject(new Error(response.error || "Unknown error"));
+          }
+          this.pendingEvaluations.delete(id);
+        }
+        this.notifyMessageHandlers(response);
+      }
+    };
+    logger.debug("WorkerEvaluator: Registering message handler and sending message");
+    this.on("message", messageHandler);
+    this.worker.postMessage(message);
+    if (!this.pendingEvaluations.has(id)) {
+      logger.debug("WorkerEvaluator: Setting up message listener");
+      if (this.isBrowser) {
+        this.worker.addEventListener("message", (event) => {
+          logger.debug("WorkerEvaluator: Received browser worker message:", JSON.stringify(event.data, null, 2));
+          this.handleWorkerMessage(event.data);
+        }, { once: true });
+      } else {
+        this.worker.once("message", (data) => {
+          logger.debug("WorkerEvaluator: Received Node.js worker message:", JSON.stringify(data, null, 2));
+          this.handleWorkerMessage(data);
+        });
+      }
+    }
+  }
+  /**
+   * Asynchronously evaluates JavaScript code (for non-WASM use cases).
+   * @param code The JavaScript code to evaluate.
+   * @returns A promise that resolves on success or rejects on failure.
+   */
+  async evaluate(code) {
+    if (!this.worker) {
+      throw new Error("Worker not initialized");
+    }
+    if (!code) {
+      throw new Error("JavaScript code cannot be empty");
+    }
+    const id = `${Date.now()}-${Math.random()}`;
+    return new Promise((resolve, reject) => {
+      this.pendingEvaluations.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        this.pendingEvaluations.delete(id);
+        reject(new Error("Worker evaluation timed out"));
+      }, _WorkerEvaluator.EVALUATION_TIMEOUT_MS);
+      this.worker.postMessage({ id, type: "evaluate", code });
+    });
+  }
+  /**
+   * Handles incoming worker messages.
+   * @param data The worker's response.
+   */
+  handleWorkerMessage(data) {
+    if (!data || typeof data !== "object" || !data.id || data.type !== "complete" || typeof data.success !== "boolean" || typeof data.error !== "string" && data.error !== null || typeof data.output !== "string") {
+      this.notifyErrorHandlers(new Error("Invalid worker response format"));
+      return;
+    }
+    const pending = this.pendingEvaluations.get(data.id);
+    if (pending) {
+      if (data.success) {
+        if (data.output) {
+          logger.info("Worker output:", data.output);
+        }
+        pending.resolve();
+      } else {
+        pending.reject(new Error(data.error || "Unknown error"));
+      }
+      this.pendingEvaluations.delete(data.id);
+    }
+    this.notifyMessageHandlers(data);
+  }
+  /**
+   * Notifies message handlers with the response.
+   * @param response The worker's response.
+   */
+  notifyMessageHandlers(response) {
+    this.messageHandlers.forEach((handlers) => {
+      handlers.forEach((handler) => handler(response));
+    });
+  }
+  /**
+   * Notifies error handlers with the error.
+   * @param error The error to report.
+   */
+  notifyErrorHandlers(error) {
+    this.errorHandlers.forEach((handler) => handler(error));
+  }
+  /**
+   * Terminates the worker and cleans up resources.
+   */
+  async terminate() {
+    if (this.worker) {
+      try {
+        if (this.isBrowser) {
+          this.worker.terminate();
+          if (this.workerUrl) {
+            URL.revokeObjectURL(this.workerUrl);
+            this.workerUrl = null;
+          }
+        } else {
+          await this.worker.terminate();
+        }
+      } catch (error) {
+        logger.warn(`Failed to terminate worker: ${error}`);
+      }
+      this.worker = null;
+    }
+    this.messageHandlers.clear();
+    this.errorHandlers = [];
+    this.pendingEvaluations.clear();
+  }
+};
+_WorkerEvaluator.EVALUATION_TIMEOUT_MS = 5e3;
+var WorkerEvaluator = _WorkerEvaluator;
 
 // src/wasm-wrapper.ts
-var instance = null;
-var workerEvaluator = null;
-async function initWasm(wasmSource) {
-  workerEvaluator = new WorkerEvaluator();
-  await workerEvaluator.initialize();
-  const imports = {
-    index: {
-      evaluate: async (ptr, length) => {
-        if (!instance) {
-          throw new Error("WASM instance not initialized");
-        }
-        const memory = instance.exports.memory;
-        if (ptr < 0 || length < 0 || ptr + length > memory.buffer.byteLength) {
-          throw new Error(`Invalid memory access: ptr=${ptr}, length=${length}`);
-        }
-        const rawBytes = new Uint8Array(memory.buffer, ptr, length);
-        const jsCode = new TextDecoder().decode(rawBytes).trim();
-        try {
-          await workerEvaluator.evaluate(jsCode);
-        } catch (error) {
-          console.error("Error executing JavaScript code:", error);
-          throw error;
-        }
-      },
-      __new: (size, id) => {
-        return instance.exports.__new(size, id);
-      },
-      __pin: (ptr) => {
-        return instance.exports.__pin(ptr);
-      },
-      __unpin: (ptr) => {
-        return instance.exports.__unpin(ptr);
-      },
-      __collect: () => {
-        return instance.exports.__collect();
-      },
-      memory_copy: (dest, src, n) => {
-        const memory = instance.exports.memory;
-        const destArray = new Uint8Array(memory.buffer, dest, n);
-        const srcArray = new Uint8Array(memory.buffer, src, n);
-        destArray.set(srcArray);
-      },
-      __free: (ptr) => {
-      }
-    },
-    env: {
-      abort: (msg, file, line, column) => {
-        console.error("WASM abort:", msg, file, line, column);
-        throw new Error("WASM abort");
-      }
-    }
-  };
-  try {
-    if (typeof wasmSource === "string") {
-      const response = await fetch(wasmSource);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch WASM file: ${response.statusText}`);
-      }
-      const buffer = await response.arrayBuffer();
-      instance = await instantiate(buffer, imports);
-    } else {
-      instance = await instantiate(wasmSource, imports);
-    }
-  } catch (error) {
-    console.error("Error instantiating WASM module:", error);
-    throw error;
+var _WasmRunner = class _WasmRunner {
+  constructor() {
+    this.instance = null;
+    this.workerEvaluator = null;
   }
-  if (!instance.exports.runHardcodedJSCode || !instance.exports.runJSCode) {
-    throw new Error("Required WASM exports (runHardcodedJSCode or runJSCode) are missing");
-  }
-  return {
-    runHardcodedJSCode: async () => {
-      const result = instance.exports.runHardcodedJSCode();
-      return new Promise((resolve) => {
-        workerEvaluator.on("message", () => {
-          resolve();
-        });
-      });
-    },
-    runJSCode: async (jsCode) => {
-      const strPtr = instance.exports.__newString(jsCode);
-      const result = instance.exports.runJSCode(strPtr);
-      return new Promise((resolve) => {
-        workerEvaluator.on("message", () => {
-          resolve();
-        });
-      });
+  // 1MB max JavaScript code size.
+  /**
+   * Initializes the WASM module and worker evaluator.
+   * @param wasmSource Path to the WASM file (browser) or buffer (Node.js).
+   * @throws Error if initialization fails.
+   */
+  async initialize(wasmSource) {
+    this.workerEvaluator = new WorkerEvaluator();
+    try {
+      await this.workerEvaluator.initialize();
+    } catch (error) {
+      throw new Error(`Failed to initialize WorkerEvaluator: ${error}`);
     }
-  };
-}
+    const imports = {
+      index: {
+        /**
+         * Evaluates JavaScript code in the worker.
+         * @param ptr Pointer to UTF-8 encoded code in WASM memory.
+         * @param length Length of the code (excluding null terminator).
+         */
+        evaluate: (ptr, length) => {
+          if (!this.instance) {
+            throw new Error("WASM instance not initialized");
+          }
+          const memory = this.instance.exports.memory;
+          if (ptr < 0 || length < 0 || ptr + length > memory.buffer.byteLength) {
+            throw new Error(`Invalid memory access: ptr=${ptr}, length=${length}`);
+          }
+          const rawBytes = new Uint8Array(memory.buffer, ptr, length);
+          const jsCode = new TextDecoder().decode(rawBytes).trim();
+          this.workerEvaluator.evaluateSync(jsCode);
+        },
+        __new: (size, id) => this.instance.exports.__new(size, id),
+        __pin: (ptr) => this.instance.exports.__pin(ptr),
+        __unpin: (ptr) => this.instance.exports.__unpin(ptr),
+        __collect: () => this.instance.exports.__collect(),
+        /**
+         * Copies n bytes from src to dest in WASM memory.
+         */
+        memory_copy: (dest, src, n) => {
+          const memory = this.instance.exports.memory;
+          if (dest < 0 || src < 0 || n < 0 || dest + n > memory.buffer.byteLength || src + n > memory.buffer.byteLength) {
+            throw new Error(`Invalid memory_copy: dest=${dest}, src=${src}, n=${n}`);
+          }
+          const destArray = new Uint8Array(memory.buffer, dest, n);
+          const srcArray = new Uint8Array(memory.buffer, src, n);
+          destArray.set(srcArray);
+        },
+        __free: (ptr) => {
+        }
+      },
+      env: {
+        /**
+         * Handles WASM runtime aborts.
+         */
+        abort: (msg, file, line, column) => {
+          throw new Error(`WASM abort at ${file}:${line}:${column}, message=${msg}`);
+        }
+      }
+    };
+    try {
+      if (typeof wasmSource === "string") {
+        const response = await fetch(wasmSource);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch WASM file: ${response.statusText}`);
+        }
+        const buffer = await response.arrayBuffer();
+        this.instance = await instantiate(buffer, imports);
+      } else {
+        if (!(wasmSource instanceof ArrayBuffer) && !(wasmSource instanceof Uint8Array)) {
+          throw new Error("Invalid wasmSource: must be string, ArrayBuffer, or Uint8Array");
+        }
+        this.instance = await instantiate(wasmSource, imports);
+      }
+    } catch (error) {
+      await this.destroy();
+      throw new Error(`Failed to instantiate WASM module: ${error}`);
+    }
+    if (!this.instance.exports.run || !this.instance.exports.runJSCode || !this.instance.exports.__newString) {
+      await this.destroy();
+      throw new Error("Required WASM exports (run, runJSCode, __newString) are missing");
+    }
+  }
+  /**
+   * Runs the WASM module's default JavaScript code.
+   * @throws Error if the WASM module or worker fails.
+   */
+  async run() {
+    if (!this.instance || !this.workerEvaluator) {
+      throw new Error("WASMRunner not initialized");
+    }
+    try {
+      this.instance.exports.run();
+      await this.waitForWorkerCompletion();
+    } catch (error) {
+      throw new Error(`Failed to run WASM module: ${error}`);
+    }
+  }
+  /**
+   * Runs the provided JavaScript code via the WASM module.
+   * @param jsCode The JavaScript code to execute.
+   * @throws Error if the code is invalid or execution fails.
+   */
+  async runJSCode(jsCode) {
+    if (!this.instance || !this.workerEvaluator) {
+      throw new Error("WASMRunner not initialized");
+    }
+    if (!jsCode) {
+      throw new Error("JavaScript code cannot be empty");
+    }
+    if (jsCode.length > _WasmRunner.MAX_JS_CODE_SIZE) {
+      throw new Error(`JavaScript code exceeds maximum size of ${_WasmRunner.MAX_JS_CODE_SIZE} bytes`);
+    }
+    try {
+      const strPtr = this.instance.exports.__newString(jsCode);
+      this.instance.exports.runJSCode(strPtr);
+      await this.waitForWorkerCompletion();
+    } catch (error) {
+      throw new Error(`Failed to run JavaScript code: ${error}`);
+    }
+  }
+  /**
+   * Waits for the worker to signal completion.
+   * @returns A promise that resolves when the worker completes.
+   */
+  async waitForWorkerCompletion() {
+    return new Promise((resolve, reject) => {
+      const messageHandler = (msg) => {
+        if (msg.type === "log") {
+          return;
+        }
+        this.workerEvaluator.off("message", messageHandler);
+        if (!msg || typeof msg !== "object" || !msg.id || msg.type !== "complete" || typeof msg.success !== "boolean" || typeof msg.error !== "string" && msg.error !== null || typeof msg.output !== "string") {
+          reject(new Error("Invalid worker response format"));
+          return;
+        }
+        if (msg.success) {
+          resolve();
+        } else {
+          reject(new Error(msg.error || "Unknown error"));
+        }
+      };
+      this.workerEvaluator.on("message", messageHandler);
+      this.workerEvaluator.on("error", (error) => {
+        this.workerEvaluator.off("message", messageHandler);
+        reject(new Error(`Worker error: ${error.message}`));
+      });
+    });
+  }
+  /**
+   * Cleans up resources (e.g., terminates the worker).
+   */
+  async destroy() {
+    if (this.workerEvaluator) {
+      try {
+        await this.workerEvaluator.terminate();
+      } catch (error) {
+        console.warn(`Failed to terminate WorkerEvaluator: ${error}`);
+      }
+      this.workerEvaluator = null;
+    }
+    this.instance = null;
+  }
+  async terminate() {
+    await this.destroy();
+  }
+};
+_WasmRunner.MAX_JS_CODE_SIZE = 1024 * 1024;
+var WasmRunner = _WasmRunner;
+var wasmRunner = new WasmRunner();
+var initWasm = async (wasmSource) => {
+  await wasmRunner.initialize(wasmSource);
+  return wasmRunner;
+};
 export {
   WorkerEvaluator,
   initWasm

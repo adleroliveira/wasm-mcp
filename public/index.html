@@ -40,7 +40,7 @@
     </div>
 
     <div>
-        <button id="runHardcodedBtn">Run Hardcoded Code</button>
+        <button id="runBtn">Run</button>
         <button id="runCustomBtn">Run Custom Code</button>
     </div>
 
@@ -61,27 +61,34 @@
 
         // Initialize WASM
         try {
+            console.log('Starting WASM initialization...');
             wasmInstance = await initWasm('/js/index.wasm');
             console.log('WASM module loaded successfully!');
+            console.log('WASM instance:', wasmInstance);
         } catch (error) {
             console.error('Failed to load WASM module:', error);
         }
 
         // Add event listeners
-        document.getElementById('runHardcodedBtn').addEventListener('click', async () => {
+        document.getElementById('runBtn').addEventListener('click', async () => {
+            console.log('Run button clicked');
             output.textContent = ''; // Clear previous output
             try {
-                await wasmInstance.runHardcodedJSCode();
-                console.log('Hardcoded code executed successfully!');
+                console.log('Calling wasmInstance.run()...');
+                await wasmInstance.run();
+                console.log('Code executed successfully!');
             } catch (error) {
-                console.error('Error running hardcoded code:', error);
+                console.error('Error running code:', error);
             }
         });
 
         document.getElementById('runCustomBtn').addEventListener('click', async () => {
+            console.log('Run Custom button clicked');
             output.textContent = ''; // Clear previous output
             const jsCode = document.getElementById('jsCode').value;
+            console.log('Custom code to run:', jsCode);
             try {
+                console.log('Calling wasmInstance.runJSCode()...');
                 await wasmInstance.runJSCode(jsCode);
                 console.log('Custom code executed successfully!');
             } catch (error) {

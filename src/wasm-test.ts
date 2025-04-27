@@ -7,7 +7,7 @@ async function main() {
 
   // Wait for each operation to complete
   await Promise.all([
-    wasm.runHardcodedJSCode(), // Outputs: Hello from WASM!
+    wasm.run(), // Outputs: Hello from WASM!
     wasm.runJSCode("console.log('Dynamic code!');") // Outputs: Dynamic code!
   ]);
 
