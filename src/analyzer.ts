@@ -8,27 +8,73 @@ export interface AnalyzerOptions {
   artifactsDir: string;
 }
 
-export interface SymbolAnalysis {
-  functions: {
-    name: string;
-    parameters: string[];
-  }[];
-  classes: {
-    name: string;
-    methods: string[];
-  }[];
-  variables: string[];
-  exports: string[];
-  nonStandardImports: {
-    node: string[];
-    browser: string[];
-    other: string[];
-  };
+export interface ImportAnalysis {
+  nonStandardImports: string[];
+  nodeGlobals: string[];
+  nodeStandardModules: string[];
 }
 
 export class Analyzer {
   private packageDir: string;
   private artifactsDir: string;
+
+  private readonly nodeStandardModules = new Set([
+    'assert',           // Assertion testing
+    'async_hooks',      // Tracking asynchronous resources
+    'buffer',           // Binary data handling (distinct from ArrayBuffer)
+    'child_process',    // Spawning child processes
+    'cluster',          // Multi-core process management
+    'console',          // Node.js-specific console features
+    'crypto',           // Cryptographic utilities (beyond browser crypto)
+    'dgram',            // UDP/datagram sockets
+    'diagnostics_channel', // Diagnostic event channels
+    'dns',              // DNS resolution
+    'domain',           // Deprecated error handling
+    'events',           // EventEmitter (distinct from EventTarget)
+    'fs',               // File system operations
+    'http',             // HTTP server/client
+    'http2',            // HTTP/2 server/client
+    'https',            // HTTPS server/client
+    'inspector',        // Debugging interface
+    'module',           // Module system utilities
+    'net',              // TCP/IPC networking
+    'os',               // Operating system information
+    'path',             // File system path utilities
+    'perf_hooks',       // Performance measurement
+    'process',          // Process information and control
+    'readline',         // Line-by-line input processing
+    'repl',             // Read-eval-print loop
+    'stream',           // Stream API (distinct from ReadableStream)
+    'timers',           // Node.js-specific timer behaviors
+    'tls',              // TLS/SSL networking
+    'tty',              // Terminal device handling
+    'util',             // Utility functions (e.g., promisify)
+    'v8',               // V8 engine utilities
+    'vm',               // Virtual machine for isolated code
+    'worker_threads',   // Multi-threading
+    'zlib'              // Compression
+  ]);
+
+  // List of Node.js-specific globals that need to be polyfilled
+  // These are globals that are NOT available in browsers by default
+  private readonly nodeGlobals = new Set([
+    'process',           // Node.js process information and control
+    'Buffer',           // Binary data handling
+    'global',           // Node.js global namespace (unlike window/self in browsers)
+    '__dirname',        // Directory name of the current module
+    '__filename',       // Filename of the current module
+    'setImmediate',     // Immediate callback execution
+    'clearImmediate',   // Cancel setImmediate
+    'module',           // CommonJS module object
+    'exports',          // CommonJS module.exports
+    'require',          // CommonJS module import function
+    'crypto',           // Node.js cryptographic utilities (distinct from browser's window.crypto)
+    'stream',           // Node.js streams (distinct from browser ReadableStream/WritableStream)
+    'util',             // Node.js utility functions (e.g., promisify, format)
+    'domain',           // Deprecated Node.js error handling
+    'vm',               // Node.js virtual machine for isolated code execution
+    'EventEmitter'      // Node.js event emitter (distinct from browser EventTarget)
+  ]);
 
   constructor(options: AnalyzerOptions) {
     this.packageDir = options.packageDir;
@@ -50,137 +96,89 @@ export class Analyzer {
     console.log(`Artifact saved: ${artifactPath}`);
   }
 
-  private async analyzeFile(filePath: string): Promise<SymbolAnalysis> {
+  private async analyzeFile(filePath: string): Promise<ImportAnalysis> {
     const content = await fs.readFile(filePath, 'utf-8');
     const ast = parse(content, {
       sourceType: 'module',
       ecmaVersion: 'latest'
     });
 
-    const analysis: SymbolAnalysis = {
-      functions: [],
-      classes: [],
-      variables: [],
-      exports: [],
-      nonStandardImports: {
-        node: [],
-        browser: [],
-        other: []
-      }
+    const analysis: ImportAnalysis = {
+      nonStandardImports: [],
+      nodeGlobals: [],
+      nodeStandardModules: []
     };
 
-    // Use Sets to track unique imports
-    const nodeImports = new Set<string>();
-    const browserImports = new Set<string>();
-    const otherImports = new Set<string>();
+    // Use Sets to track unique values
+    const nonStandardImports = new Set<string>();
+    const usedNodeGlobals = new Set<string>();
+    const usedNodeModules = new Set<string>();
 
-    walk.simple(ast, {
-      FunctionDeclaration(node: any) {
-        if (node.id) {
-          analysis.functions.push({
-            name: node.id.name,
-            parameters: node.params.map((param: any) => param.name)
-          });
-        }
-      },
-      ClassDeclaration(node: any) {
-        if (node.id) {
-          const methods = node.body.body
-            .filter((method: any) => method.type === 'MethodDefinition')
-            .map((method: any) => method.key.name);
-
-          analysis.classes.push({
-            name: node.id.name,
-            methods
-          });
-        }
-      },
-      VariableDeclaration(node: any) {
-        node.declarations.forEach((decl: any) => {
-          if (decl.id.type === 'Identifier') {
-            analysis.variables.push(decl.id.name);
-          }
-        });
-      },
-      ExportNamedDeclaration(node: any) {
-        if (node.declaration) {
-          if (node.declaration.type === 'FunctionDeclaration' && node.declaration.id) {
-            analysis.exports.push(node.declaration.id.name);
-          } else if (node.declaration.type === 'ClassDeclaration' && node.declaration.id) {
-            analysis.exports.push(node.declaration.id.name);
-          } else if (node.declaration.type === 'VariableDeclaration') {
-            node.declaration.declarations.forEach((decl: any) => {
-              if (decl.id.type === 'Identifier') {
-                analysis.exports.push(decl.id.name);
-              }
-            });
-          }
-        }
-        if (node.specifiers) {
-          node.specifiers.forEach((specifier: any) => {
-            if (specifier.exported) {
-              analysis.exports.push(specifier.exported.name);
-            }
-          });
-        }
-      },
-      ExportDefaultDeclaration(node: any) {
-        if (node.declaration.type === 'FunctionDeclaration' && node.declaration.id) {
-          analysis.exports.push(node.declaration.id.name);
-        } else if (node.declaration.type === 'ClassDeclaration' && node.declaration.id) {
-          analysis.exports.push(node.declaration.id.name);
-        } else if (node.declaration.type === 'Identifier') {
-          analysis.exports.push(node.declaration.name);
-        }
-      },
-      ImportDeclaration(node: any) {
+    const visitors = {
+      ImportDeclaration: (node: any) => {
         const source = node.source.value;
 
-        // Check for Node.js built-in modules
-        if (source.startsWith('node:') ||
-          ['fs', 'path', 'http', 'https', 'crypto', 'stream', 'util', 'events', 'buffer', 'os', 'net', 'dns', 'zlib', 'child_process', 'cluster', 'dgram', 'tls', 'tty', 'url', 'v8', 'vm', 'worker_threads'].includes(source)) {
-          nodeImports.add(source);
+        // Track any import that is not a relative or absolute path
+        if (!source.startsWith('./') &&
+          !source.startsWith('../') &&
+          !source.startsWith('/')) {
+          nonStandardImports.add(source);
+
+          // Check if it's a Node.js standard module
+          if (this.nodeStandardModules.has(source)) {
+            usedNodeModules.add(source);
+          }
         }
-        // Check for browser APIs
-        else if (source.startsWith('window:') ||
-          ['document', 'window', 'navigator', 'location', 'history', 'localStorage', 'sessionStorage', 'fetch', 'WebSocket', 'XMLHttpRequest', 'Blob', 'File', 'FormData', 'URL', 'URLSearchParams', 'Headers', 'Request', 'Response', 'crypto', 'performance', 'console', 'alert', 'confirm', 'prompt'].includes(source)) {
-          browserImports.add(source);
+      },
+      CallExpression: (node: any) => {
+        // Check for require() calls
+        if (node.callee.type === 'Identifier' &&
+          node.callee.name === 'require' &&
+          node.arguments.length > 0 &&
+          node.arguments[0].type === 'Literal') {
+          const source = node.arguments[0].value;
+
+          // Check if it's a Node.js standard module
+          if (this.nodeStandardModules.has(source)) {
+            usedNodeModules.add(source);
+          }
         }
-        // Other non-standard imports
-        else if (!source.startsWith('.') && !source.startsWith('/')) {
-          otherImports.add(source);
+      },
+      MemberExpression: (node: any) => {
+        // Check for process.cwd(), process.env, etc.
+        if (node.object.type === 'Identifier' &&
+          this.nodeGlobals.has(node.object.name)) {
+          usedNodeGlobals.add(node.object.name);
+        }
+      },
+      Identifier: (node: any) => {
+        // Check for direct usage of globals like process, Buffer, etc.
+        if (this.nodeGlobals.has(node.name)) {
+          usedNodeGlobals.add(node.name);
         }
       }
-    });
+    };
+
+    walk.simple(ast, visitors);
 
     // Convert Sets to arrays for the final result
-    analysis.nonStandardImports = {
-      node: Array.from(nodeImports),
-      browser: Array.from(browserImports),
-      other: Array.from(otherImports)
-    };
+    analysis.nonStandardImports = Array.from(nonStandardImports).sort();
+    analysis.nodeGlobals = Array.from(usedNodeGlobals).sort();
+    analysis.nodeStandardModules = Array.from(usedNodeModules).sort();
 
     return analysis;
   }
 
-  async analyze(): Promise<{ source: SymbolAnalysis; bundle: SymbolAnalysis }> {
+  async analyze(): Promise<ImportAnalysis> {
     try {
       await this.ensureArtifactsDir();
-
-      // Analyze source file
-      const sourcePath = path.join(this.packageDir, 'source', 'dist', 'index.js');
-      const sourceAnalysis = await this.analyzeFile(sourcePath);
-      await this.saveArtifact('source-symbols', sourceAnalysis);
 
       // Analyze bundled file
       const bundlePath = path.join(this.packageDir, 'dist', 'bundle.js');
       const bundleAnalysis = await this.analyzeFile(bundlePath);
-      await this.saveArtifact('bundle-symbols', bundleAnalysis);
+      await this.saveArtifact('bundle-imports', bundleAnalysis);
 
-      return {
-        source: sourceAnalysis,
-        bundle: bundleAnalysis
-      };
+      return bundleAnalysis;
 
     } catch (error) {
       console.error('Analysis failed:', error);

@@ -23,12 +23,22 @@ interface RawConfig {
       [key: string]: unknown;
     };
   };
+  mcp?: {
+    servers?: {
+      [key: string]: {
+        command?: string;
+        args?: string[];
+        env?: Record<string, string>;
+        [key: string]: unknown;
+      };
+    };
+  };
 }
 
 async function validateConfig(config: RawConfig): Promise<{ serverConfig: MCPServerConfig; projectName: string }> {
-  const serverConfigs = config.mcpServers || config['mcp-servers'];
+  const serverConfigs = config.mcpServers || config['mcp-servers'] || config.mcp?.servers;
   if (!serverConfigs) {
-    throw new Error('No server configurations found in the config file. Expected either "mcpServers" or "mcp-servers" as root key.');
+    throw new Error('No server configurations found in the config file. Expected either "mcpServers", "mcp-servers", or "mcp.servers" as root key.');
   }
 
   const entries = Object.entries(serverConfigs);

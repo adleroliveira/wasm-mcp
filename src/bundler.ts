@@ -75,7 +75,7 @@ export class Bundler {
       const entryPoint = await this.resolveEntryPoint();
       const format = await this.getModuleFormat();
 
-      // Bundle the code
+      // Bundle the code with optimizations
       const result = await esbuild.build({
         entryPoints: [entryPoint],
         bundle: true,
@@ -85,6 +85,20 @@ export class Bundler {
         format,
         sourcemap: true,
         metafile: true,
+        // Optimization options
+        minify: true, // Enable minification
+        minifyWhitespace: true, // Remove whitespace
+        minifyIdentifiers: true, // Shorten identifiers
+        minifySyntax: true, // Optimize syntax
+        treeShaking: true, // Remove unused code
+        legalComments: 'none', // Remove legal comments
+        // Advanced optimizations
+        define: {
+          'process.env.NODE_ENV': '"production"', // Enable production optimizations
+        },
+        // Code splitting (if needed)
+        splitting: false, // Set to true if you want to enable code splitting
+        chunkNames: 'chunks/[name]-[hash]',
       });
 
       // Save metadata
@@ -93,7 +107,12 @@ export class Bundler {
         JSON.stringify(result.metafile, null, 2)
       );
 
-      return path.join(this.outDir, 'bundle.js');
+      // Log bundle size information
+      const bundlePath = path.join(this.outDir, 'bundle.js');
+      const stats = await fs.stat(bundlePath);
+      console.log(`Bundle size: ${(stats.size / 1024).toFixed(2)} KB`);
+
+      return bundlePath;
     } catch (error) {
       console.error('Bundling failed:', error);
       throw error;

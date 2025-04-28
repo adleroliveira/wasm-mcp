@@ -24,9 +24,11 @@
   },
   "dependencies": {
     "@assemblyscript/loader": "^0.27.36",
+    "@modelcontextprotocol/sdk": "^1.10.2",
     "acorn": "^8.14.1",
     "acorn-walk": "^8.3.4",
     "assemblyscript": "^0.27.36",
+    "assemblyscript-json": "^1.1.0",
     "commander": "^13.1.0"
   },
   "devDependencies": {
@@ -34,7 +36,6 @@
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
-    "as-bind": "^0.8.2",
     "assemblyscript": "^0.27.36",
     "esbuild": "^0.25.3",
     "eslint": "^8.56.0",
